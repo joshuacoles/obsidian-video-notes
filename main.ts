@@ -1,112 +1,114 @@
-import { App, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { MarkdownRenderChild, MarkdownView, Plugin } from 'obsidian';
 
-interface MyPluginSettings {
-  mySetting: string;
+import { runAppleScriptAsync } from "run-applescript";
+
+interface VideoController {
+  open(value: string): Promise<void>;
+  getCurrentTimestamp(): Promise<string>
+  seekToTimestamp(timeStamp: string): Promise<void>
+
+  isOpen(value: string): Promise<boolean>
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-  mySetting: 'default'
-}
+const generic: VideoController = {
+  async isOpen(value: string): Promise<boolean> {
+    return true;
+  },
 
-export default class MyPlugin extends Plugin {
-  settings: MyPluginSettings;
+  async open(url) {
+    // We specify safari as that is what we are using in all the other commands.
+    await runAppleScriptAsync(`do shell script "open -a Safari '${url}'`);
+  },
+
+  async getCurrentTimestamp(): Promise<string> {
+    const js = `t = document.querySelector('video').currentTime; ts= Math.floor(t / 60) + ':' + (Math.floor(t) % 60); ts`;
+    return await runAppleScriptAsync(`tell application "Safari" to do JavaScript "${js}" in document 1`);
+  },
+
+  async seekToTimestamp(ts: string) {
+    const [m, s] = ts.split(':');
+    const tc = (+m * 60) + +s;
+    const js = `document.querySelector('video').currentTime = ${tc}`;
+    await runAppleScriptAsync(`tell application "Safari" to do JavaScript "${js}" in document 1`);
+  }
+};
+
+export default class VideoNotesPlugin extends Plugin {
+  statusBarItem: HTMLElement;
 
   async onload() {
     console.log('loading plugin');
-
-    await this.loadSettings();
-
-    this.addRibbonIcon('dice', 'Sample Plugin', () => {
-      new Notice('This is a notice!');
-    });
-
-    this.addStatusBarItem().setText('Status Bar Text');
+    this.statusBarItem = this.addStatusBarItem();
+    this.statusBarItem.setText('Status Bar Text');
 
     this.addCommand({
-      id: 'open-sample-modal',
-      name: 'Open Sample Modal',
-      // callback: () => {
-      // 	console.log('Simple Callback');
-      // },
-      checkCallback: (checking: boolean) => {
-        let leaf = this.app.workspace.activeLeaf;
-        if (leaf) {
-          if (!checking) {
-            new SampleModal(this.app).open();
-          }
-          return true;
+      id: 'insert-current-timestamp',
+      name: 'Insert Current Timestamp',
+      callback: async () => {
+        const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!activeView) {
+          console.error("Huh I thought that worked")
+          return;
         }
-        return false;
+        const ts = await generic.getCurrentTimestamp();
+
+        activeView.editor.replaceSelection(`\`vts ${ts}\``)
       }
     });
 
-    this.addSettingTab(new SampleSettingTab(this.app, this));
-
-    this.registerCodeMirror((cm: CodeMirror.Editor) => {
-      console.log('codemirror', cm);
+    this.addCommand({
+      id: 'open-associated-video',
+      name: 'Open Associated Video',
+      callback: async () => {
+        const video: string | undefined = this.app.metadataCache.getFileCache(this.app.workspace.getActiveFile()).frontmatter['video'];
+        if (video) {
+          await generic.open(video);
+        }
+      }
     });
 
-    this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-      console.log('click', evt);
-    });
+    this.registerMarkdownPostProcessor(async (el, ctx) => {
+      // Search for <code> blocks inside this element, looking for things `vts mm:ss`
+      let codeblocks = el.querySelectorAll("code");
+      for (let index = 0; index < codeblocks.length; index++) {
+        let codeblock = codeblocks.item(index);
 
-    this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+        let match = codeblock.innerText.trim().match(/vts (\d+:\d\d)/);
+        if (!match) continue;
+        let timeStamp = match[1];
+
+        ctx.addChild(new TimeStampRenderer(timeStamp, el, codeblock, this));
+      }
+    });
   }
 
   onunload() {
     console.log('unloading plugin');
   }
+}
 
-  async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+class TimeStampRenderer extends MarkdownRenderChild {
+  constructor(
+    public timeStamp: string,
+    public container: HTMLElement,
+    public target: HTMLElement,
+    public plugin: VideoNotesPlugin
+  ) {
+    super(container);
   }
 
-  async saveSettings() {
-    await this.saveData(this.settings);
+  async onload() {
+    await this.render();
+  }
+
+  async render() {
+    let temp = document.createElement("span");
+    // Steal the themes tag styles
+    temp.className = 'tag';
+    temp.onclick = () => generic.seekToTimestamp(this.timeStamp);
+    temp.textContent = `[${this.timeStamp}]`;
+
+    this.target.replaceWith(temp);
   }
 }
 
-class SampleModal extends Modal {
-  constructor(app: App) {
-    super(app);
-  }
-
-  onOpen() {
-    let { contentEl } = this;
-    contentEl.setText('Woah!');
-  }
-
-  onClose() {
-    let { contentEl } = this;
-    contentEl.empty();
-  }
-}
-
-class SampleSettingTab extends PluginSettingTab {
-  plugin: MyPlugin;
-
-  constructor(app: App, plugin: MyPlugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-
-  display(): void {
-    let { containerEl } = this;
-
-    containerEl.empty();
-
-    containerEl.createEl('h2', { text: 'Settings for my awesome plugin.' });
-
-    new Setting(containerEl)
-      .setName('Setting #1')
-      .setDesc('It\'s a secret')
-      .addText(text => text
-        .setPlaceholder('Enter your secret')
-        .setValue('')
-        .onChange(async (value) => {
-          console.log('Secret: ' + value);
-          this.plugin.settings.mySetting = value;
-          await this.plugin.saveSettings();
-        }));
-  }
-}
